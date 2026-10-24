@@ -1,0 +1,26 @@
+{
+  "name": "helpers-league",
+  "version": "1.0.0",
+  "description": "\"Лига Помощников\" - проект для хакатона \"ИДЕЯ ФИКС\"",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pokedimon/helpers-league.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/pokedimon/helpers-league/issues"
+  },
+  "homepage": "https://github.com/pokedimon/helpers-league#readme",
+  "dependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "daisyui": "^5.7.50",
+    "tailwindcss": "^4.3.3"
+  }
+}
