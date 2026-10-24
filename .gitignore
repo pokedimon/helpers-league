@@ -6,4 +6,5 @@
 /skills-lock.json
 /node_modules
 /package-lock.json
+/.env
 /etc
