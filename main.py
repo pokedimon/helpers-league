@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 import re
 import time
@@ -20,7 +21,11 @@ HTTP_TIMEOUT = LONG_POLL_TIMEOUT + 15
 BOT_ID = None
 DB_DIR = "db"
 CSV_FILE = os.path.join(DB_DIR, "questions.csv")
-CSV_HEADERS = ["mid", "asker_id", "asker_name", "question", "chat_id"]
+CSV_HEADERS = ["mid", "asker_id", "asker_name", "question", "chat_id", "bot_mid", "status"]
+BALANCES_FILE = os.path.join(DB_DIR, "balances.csv")
+BALANCES_HEADERS = ["user_id", "balance"]
+
+RATED_ANSWERS = set()
 
 
 def init_csv():
@@ -31,13 +36,63 @@ def init_csv():
             writer.writerow(CSV_HEADERS)
 
 
-def save_question(mid, asker_id, asker_name, question, chat_id=None):
+def init_balances_csv():
+    os.makedirs(DB_DIR, exist_ok=True)
+    if not os.path.exists(BALANCES_FILE):
+        with open(BALANCES_FILE, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(BALANCES_HEADERS)
+
+
+def get_balance(user_id):
+    if not user_id or not os.path.exists(BALANCES_FILE):
+        return 0
+    uid_str = str(user_id)
+    with open(BALANCES_FILE, mode="r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("user_id") == uid_str:
+                return int(row.get("balance", 0))
+    return 0
+
+
+def add_spasibka(user_id, count=1):
+    if not user_id:
+        return 0
+    init_balances_csv()
+    uid_str = str(user_id)
+    balances = {}
+    if os.path.exists(BALANCES_FILE):
+        with open(BALANCES_FILE, mode="r", newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("user_id"):
+                    balances[row["user_id"]] = int(row.get("balance", 0))
+    current = balances.get(uid_str, 0) + count
+    balances[uid_str] = current
+    with open(BALANCES_FILE, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(BALANCES_HEADERS)
+        for uid, bal in balances.items():
+            writer.writerow([uid, bal])
+    return current
+
+
+def save_question(mid, asker_id, asker_name, question, chat_id=None, bot_mid=None, status="open"):
     if not mid:
         return
     init_csv()
     with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow([str(mid), asker_id, asker_name, question, chat_id if chat_id is not None else ""])
+        writer.writerow([
+            str(mid),
+            asker_id,
+            asker_name,
+            question,
+            chat_id if chat_id is not None else "",
+            str(bot_mid) if bot_mid else "",
+            status,
+        ])
 
 
 def get_question(mid):
@@ -48,14 +103,46 @@ def get_question(mid):
     with open(CSV_FILE, mode="r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            if row.get("mid") == mid_str:
+            if row.get("mid") == mid_str or row.get("bot_mid") == mid_str:
                 result = {
+                    "mid": row.get("mid"),
                     "asker_id": int(row["asker_id"]) if row.get("asker_id") else None,
                     "asker_name": row.get("asker_name", ""),
                     "question": row.get("question", ""),
                     "chat_id": int(row["chat_id"]) if row.get("chat_id") else None,
+                    "bot_mid": row.get("bot_mid", ""),
+                    "status": row.get("status", "open"),
                 }
     return result
+
+
+def close_question(q_mid):
+    if not q_mid or not os.path.exists(CSV_FILE):
+        return None
+    q_str = str(q_mid)
+    rows = []
+    updated = None
+    with open(CSV_FILE, mode="r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            if row.get("mid") == q_str or row.get("bot_mid") == q_str:
+                row["status"] = "closed"
+                updated = {
+                    "mid": row.get("mid"),
+                    "asker_id": int(row["asker_id"]) if row.get("asker_id") else None,
+                    "asker_name": row.get("asker_name", ""),
+                    "question": row.get("question", ""),
+                    "chat_id": int(row["chat_id"]) if row.get("chat_id") else None,
+                    "bot_mid": row.get("bot_mid", ""),
+                    "status": "closed",
+                }
+            rows.append(row)
+    if updated:
+        with open(CSV_FILE, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_HEADERS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+    return updated
 
 
 def get_bot_id():
@@ -91,7 +178,7 @@ def get_user_name(user):
     return "Пользователь"
 
 
-def send_message(text, chat_id=None, user_id=None, reply_to_mid=None):
+def send_message(text, chat_id=None, user_id=None, reply_to_mid=None, attachments=None):
     params = {}
     if chat_id is not None and int(chat_id) != 0:
         params["chat_id"] = int(chat_id)
@@ -106,6 +193,8 @@ def send_message(text, chat_id=None, user_id=None, reply_to_mid=None):
             "type": "reply",
             "mid": str(reply_to_mid),
         }
+    if attachments:
+        payload["attachments"] = attachments
 
     try:
         response = requests.post(
@@ -124,6 +213,51 @@ def send_message(text, chat_id=None, user_id=None, reply_to_mid=None):
     return None
 
 
+def edit_message(message_id, text, attachments=None):
+    if not message_id:
+        return None
+    payload = {"text": text}
+    if attachments is not None:
+        payload["attachments"] = attachments
+    try:
+        response = requests.put(
+            f"{BASE_URL}/messages",
+            params={"message_id": str(message_id)},
+            json=payload,
+            headers=HEADERS,
+            timeout=30,
+            verify=False,
+        )
+        if response.status_code == 200:
+            return response.json() if response.content else True
+        print(f"[edit error] {response.status_code}: {response.text}")
+    except requests.RequestException as e:
+        print(f"[network error] {e}")
+    return None
+
+
+def answer_callback(callback_id, notification_text=None):
+    if not callback_id:
+        return False
+    params = {"callback_id": callback_id}
+    body = {}
+    if notification_text:
+        body["notification"] = notification_text
+    try:
+        response = requests.post(
+            f"{BASE_URL}/answers",
+            params=params,
+            json=body,
+            headers=HEADERS,
+            timeout=10,
+            verify=False,
+        )
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[answer callback error] {e}")
+    return False
+
+
 def extract_mid_from_send_response(res):
     if not res:
         return None
@@ -134,6 +268,60 @@ def extract_mid_from_send_response(res):
 
 def handle_update(update):
     utype = update.get("update_type")
+
+    if utype == "message_callback":
+        callback = update.get("callback") or {}
+        callback_id = callback.get("callback_id")
+        cb_user = callback.get("user") or {}
+        cb_user_id = cb_user.get("user_id")
+        payload_raw = callback.get("payload") or ""
+
+        try:
+            data = json.loads(payload_raw)
+        except Exception:
+            data = {}
+
+        if data.get("act") == "rate":
+            asker_id = data.get("asker_id")
+            if asker_id and cb_user_id and int(cb_user_id) != int(asker_id):
+                answer_callback(callback_id, "Только автор вопроса может оценить ответ")
+                return
+
+            rate_key = f"{data.get('mid')}_{data.get('replier_id')}"
+            if rate_key in RATED_ANSWERS:
+                answer_callback(callback_id, "Ответ уже был оценен")
+                return
+            RATED_ANSWERS.add(rate_key)
+
+            rate = data.get("rate")
+            replier_id = data.get("replier_id")
+            chat_id = data.get("chat_id")
+            q_mid = data.get("q_mid")
+            bot_mid = data.get("bot_mid")
+
+            if rate == "thanks":
+                target_mid = bot_mid or q_mid
+                closed_info = close_question(target_mid)
+                if not closed_info and target_mid:
+                    closed_info = get_question(target_mid) or {}
+
+                asker_name = closed_info.get("asker_name")
+                question_text = closed_info.get("question")
+                if asker_name and question_text and target_mid:
+                    closed_text = f"Вопрос от {asker_name}:\n{question_text}\n\nВопрос закрыт"
+                    edit_message(target_mid, closed_text)
+
+                if replier_id:
+                    add_spasibka(replier_id, 1)
+                    send_message("Ваш ответ помог. На баланс начислена 1 спасибка.", user_id=int(replier_id))
+                if chat_id and int(chat_id) != 0:
+                    send_message("Ответ помог. Вопрос закрыт", chat_id=int(chat_id), reply_to_mid=target_mid)
+                answer_callback(callback_id, "Спасибо за оценку!")
+            elif rate == "no":
+                if replier_id:
+                    send_message("Ваш ответ не помог.", user_id=int(replier_id))
+                answer_callback(callback_id, "Оценка принята")
+        return
 
     if utype == "bot_started":
         chat_id = update.get("chat_id")
@@ -187,9 +375,9 @@ def handle_update(update):
 
             bot_mid = extract_mid_from_send_response(res)
             if bot_mid:
-                save_question(bot_mid, sender_id, sender_name, question, target_chat_id)
+                save_question(bot_mid, sender_id, sender_name, question, target_chat_id, bot_mid=bot_mid, status="open")
             if mid:
-                save_question(mid, sender_id, sender_name, question, target_chat_id)
+                save_question(mid, sender_id, sender_name, question, target_chat_id, bot_mid=bot_mid, status="open")
             return
 
         reply_match = re.match(r"^/reply(?:@\w+)?(?:\s+([\s\S]+))?$", text, re.IGNORECASE)
@@ -211,15 +399,73 @@ def handle_update(update):
 
             question_data = get_question(linked_mid) if linked_mid else None
             asker_id = None
+            orig_chat_id = None
+            orig_bot_mid = None
             if question_data:
+                if question_data.get("status") == "closed":
+                    closed_msg = "Этот вопрос уже закрыт"
+                    if chat_type == "chat" or (chat_id is not None and int(chat_id) != 0 and chat_type != "dialog"):
+                        send_message(closed_msg, chat_id=int(chat_id), reply_to_mid=mid)
+                    elif sender_id is not None and int(sender_id) != 0:
+                        send_message(closed_msg, user_id=int(sender_id), reply_to_mid=mid)
+                    return
                 asker_id = question_data.get("asker_id")
+                orig_chat_id = question_data.get("chat_id")
+                orig_bot_mid = question_data.get("bot_mid")
             elif linked_sender_id and linked_sender_id != current_bot_id:
                 asker_id = linked_sender_id
+                orig_chat_id = chat_id if chat_type == "chat" else None
 
             if asker_id:
                 replier_name = get_user_name(sender)
                 notification_text = f"На Ваш вопрос ответили\n{replier_name}:\n{answer}"
-                send_message(notification_text, user_id=int(asker_id))
+                buttons = [
+                    [
+                        {
+                            "type": "callback",
+                            "text": "Спасибо",
+                            "payload": json.dumps({
+                                "act": "rate",
+                                "rate": "thanks",
+                                "replier_id": sender_id,
+                                "asker_id": asker_id,
+                                "chat_id": orig_chat_id,
+                                "q_mid": linked_mid,
+                                "bot_mid": orig_bot_mid,
+                                "mid": mid,
+                            }),
+                        },
+                        {
+                            "type": "callback",
+                            "text": "Не помогло",
+                            "payload": json.dumps({
+                                "act": "rate",
+                                "rate": "no",
+                                "replier_id": sender_id,
+                                "asker_id": asker_id,
+                                "chat_id": orig_chat_id,
+                                "q_mid": linked_mid,
+                                "bot_mid": orig_bot_mid,
+                                "mid": mid,
+                            }),
+                        },
+                    ]
+                ]
+                attachments = [
+                    {
+                        "type": "inline_keyboard",
+                        "payload": {
+                            "buttons": buttons
+                        }
+                    }
+                ]
+                send_message(notification_text, user_id=int(asker_id), attachments=attachments)
+
+                ack_text = "Ответ передан автору вопроса"
+                if chat_type == "chat" or (chat_id is not None and int(chat_id) != 0 and chat_type != "dialog"):
+                    send_message(ack_text, chat_id=int(chat_id), reply_to_mid=mid)
+                elif sender_id is not None and int(sender_id) != 0:
+                    send_message(ack_text, user_id=int(sender_id), reply_to_mid=mid)
             return
 
 
@@ -229,6 +475,7 @@ def poll():
         return
 
     init_csv()
+    init_balances_csv()
     get_bot_id()
     marker = None
     print(f"Responder is running (bot_id={BOT_ID}). Waiting for updates...")
