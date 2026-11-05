@@ -9,3 +9,15 @@
 /.env
 /etc
 /db
+/data
+/dev_docs
+/tests
+/.pytest_cache
+/.coverage
+/htmlcov
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
