@@ -10,4 +10,5 @@
 
 ### Бэкенд
 - Python (FastAPI)
-- PostgreSQL
+- SQLite3
+- MAX API
